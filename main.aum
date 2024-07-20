@@ -1,0 +1,105 @@
+import Standard.IO (
+  TerminalCapability,
+  acquireTerminal,
+  releaseTerminal
+);
+import Standard.IO.Terminal (
+  StandardInput,
+  acquireInput,
+  releaseInput,
+  readLine
+);
+import Standard.String (
+  String,
+  getSpan,
+  length,
+  destroyString
+);
+
+module body Main is
+  function main(cap: RootCapability): ExitCode is
+    var mutCap: RootCapability := cap;
+    var terminalCap: TerminalCapability := acquireTerminal(&!mutCap);
+    var standardInput: StandardInput := acquireInput(&!terminalCap);
+
+    standardInput := loop(standardInput);
+
+    releaseInput(standardInput);
+    releaseTerminal(terminalCap);
+    surrenderRoot(mutCap);
+
+    return ExitSuccess();
+  end;
+
+  record Ast: Linear is
+    value: String;
+  end;
+
+  function destroyAst(ast: Ast): Unit is
+    let { value: String } := ast;
+    destroyString(value);
+    return nil;
+  end;
+
+  union Command: Linear is
+    case Expression is
+      expression: Ast;
+    case Quit;
+  end;
+
+  function destroyCommand(command: Command): Unit is
+    case command of
+      when Expression(expression: Ast) do
+        destroyAst(expression);
+      when Quit do
+        return nil;
+    end case;
+    return nil;
+  end;
+
+  record Value: Free is
+    value: Int32;
+  end;
+
+  instance Printable(Value) is
+    method print(value: Value): Unit is
+      return print(value.value);
+    end;
+  end;
+
+  function loop(standardInput: StandardInput): StandardInput is
+    var input: StandardInput := standardInput;
+    var quit: Bool := false;
+    while not(quit) do
+      let command: Command := read(&!input);
+      case command of
+        when Expression(expression: Ast) do
+          let value: Value := evaluate(&expression);
+          print(value);
+          printLn("");
+          destroyAst(expression);
+        when Quit do
+          quit := true;
+      end case;
+    end while;
+    return input;
+  end;
+
+  generic [R: Region]
+  function read(standardInput: &![StandardInput, R]): Command is
+    print("> ");
+    let line: String := readLine(standardInput);
+    if length(&line) = 0 then
+      destroyString(line);
+      return Quit();
+    else
+      let ast: Ast := Ast(value => line);
+      return Expression(expression => ast);
+    end if;
+  end;
+
+  generic [R: Region]
+  function evaluate(ast: &[Ast, R]): Value is
+    return Value(value => 0);
+  end;
+end module body.
