@@ -6,14 +6,25 @@ import Standard.IO (
 import Standard.IO.Terminal (
   StandardInput,
   acquireInput,
-  releaseInput,
-  readLine
+  readLine,
+  releaseInput
 );
 import Standard.String (
   String,
-  getSpan,
-  length,
-  destroyString
+  destroyString,
+  fromLiteral as stringFromLiteral,
+  getSpanAll as stringGetSpanAll,
+  length as stringLength,
+  nthByte as stringNthByte
+);
+import Standard.Tuples (
+  Pair
+);
+import Standard.Equality (
+  equal
+);
+import Standard.Spans (
+  subspan
 );
 
 module body Main is
@@ -31,30 +42,42 @@ module body Main is
     return ExitSuccess();
   end;
 
-  record Ast: Linear is
-    value: String;
+  record Expression: Free is
+    expression: AdditiveExpression;
   end;
 
-  function destroyAst(ast: Ast): Unit is
-    let { value: String } := ast;
-    destroyString(value);
-    return nil;
+  union AdditiveExpression: Free is
+    case ValueExpression is
+      value: Value;
+    case AddExpression is
+      left: Value;
+      right: AdditiveExpression;
   end;
 
   union Command: Linear is
-    case Expression is
-      expression: Ast;
-    case Quit;
+    case ExpressionCommand is
+      expression: Expression;
+    case ExpressionErrorCommand is
+      message: String;
+    case NoopCommand;
+    case QuitCommand;
+    case UnexpectedCommand is
+      input: String;
   end;
 
   function destroyCommand(command: Command): Unit is
     case command of
-      when Expression(expression: Ast) do
-        destroyAst(expression);
-      when Quit do
+      when ExpressionCommand(expression: Expression) do
         return nil;
+      when ExpressionErrorCommand(message: String) do
+        return destroyString(message);
+      when NoopCommand do
+        return nil;
+      when QuitCommand do
+        return nil;
+      when UnexpectedCommand(input: String) do
+        return destroyString(input);
     end case;
-    return nil;
   end;
 
   record Value: Free is
@@ -68,38 +91,170 @@ module body Main is
   end;
 
   function loop(standardInput: StandardInput): StandardInput is
-    var input: StandardInput := standardInput;
+    var standardInput1: StandardInput := standardInput;
     var quit: Bool := false;
     while not(quit) do
-      let command: Command := read(&!input);
+      let command: Command := read(&!standardInput1);
       case command of
-        when Expression(expression: Ast) do
-          let value: Value := evaluate(&expression);
+        when ExpressionCommand(expression: Expression) do
+          let value: Value := evaluate(expression);
           print(value);
           printLn("");
-          destroyAst(expression);
-        when Quit do
+        when ExpressionErrorCommand(message: String) do
+          print("! expression parsing error: ");
+          print(stringGetSpanAll(&message));
+          printLn("");
+          destroyString(message);
+        when NoopCommand do
+          skip;
+        when QuitCommand do
           quit := true;
+        when UnexpectedCommand(input: String) do
+          print("! unexpected command: ");
+          print(stringGetSpanAll(&input));
+          printLn("");
+          destroyString(input);
       end case;
     end while;
-    return input;
+    return standardInput1;
   end;
 
   generic [R: Region]
   function read(standardInput: &![StandardInput, R]): Command is
     print("> ");
     let line: String := readLine(standardInput);
-    if length(&line) = 0 then
+    let quitCommand: String := stringFromLiteral(":quit");
+    if stringLength(&line) = 0 then
       destroyString(line);
-      return Quit();
+      destroyString(quitCommand);
+      return NoopCommand();
+    else if stringNthByte(&line, 0) = ':' then
+      if equal(&line, &quitCommand) then
+        destroyString(line);
+        destroyString(quitCommand);
+        return QuitCommand();
+      else
+        destroyString(quitCommand);
+        return UnexpectedCommand(input => line);
+      end if;
     else
-      let ast: Ast := Ast(value => line);
-      return Expression(expression => ast);
+      destroyString(quitCommand);
+      case parse(stringGetSpanAll(&line)) of
+        when Left(left: String) do
+          destroyString(line);
+          return ExpressionErrorCommand(message => left);
+        when Right(right: Expression) do
+          destroyString(line);
+          return ExpressionCommand(expression => right);
+      end case;
+    end if;
+  end;
+
+  function evaluate(expression: Expression): Value is
+    let { expression as additiveExpression: AdditiveExpression } := expression;
+    return evaluateAdditiveExpression(additiveExpression);
+  end;
+
+  function evaluateAdditiveExpression(expression: AdditiveExpression): Value is
+    case expression of
+      when ValueExpression(value: Value) do
+        return value;
+      when AddExpression(left: Value, right: AdditiveExpression) do
+        abort("not implemented");
+    end case;
+  end;
+
+  generic [R: Region]
+  function parse(string: Span[Nat8, R]): Either[String, Expression] is
+    var s: Span[Nat8, R] := string;
+    case skipSpaces(string) of
+      when None() do
+        skip;
+      when Some(value: Span[Nat8, R]) do
+        s := value;
+    end case;
+    case parseExpression(s) of
+      when Left(left: String) do
+        return Left(left => left);
+      when Right(right: Pair[Expression, Option[Span[Nat8, R]]]) do
+        case right.second of
+          when None() do
+            return Right(right => right.first);
+          when Some(value: Span[Nat8, R]) do
+            return Left(left => stringFromLiteral("unexpected extra input"));
+        end case;
+    end case;
+  end;
+
+  generic [R: Region]
+  function parseExpression(string: Span[Nat8, R]): Either[String, Pair[Expression, Option[Span[Nat8, R]]]] is
+    var s: Span[Nat8, R] := string;
+    case skipSpaces(string) of
+      when None() do
+        skip;
+      when Some(value: Span[Nat8, R]) do
+        s := value;
+    end case;
+    case parseAdditiveExpression(s) of
+      when Left(left: String) do
+        return Left(left => left);
+      when Right(right: Pair[AdditiveExpression, Option[Span[Nat8, R]]]) do
+        return Right(right => Pair(first => Expression(expression => right.first), second => right.second): Pair[Expression, Option[Span[Nat8, R]]]);
+    end case;
+  end;
+
+  generic [R: Region]
+  function parseAdditiveExpression(string: Span[Nat8, R]): Either[String, Pair[AdditiveExpression, Option[Span[Nat8, R]]]] is
+    var s: Span[Nat8, R] := string;
+    case skipSpaces(string) of
+      when None() do
+        skip;
+      when Some(value: Span[Nat8, R]) do
+        s := value;
+    end case;
+    case parseNumber(s) of
+      when Left(left: String) do
+        return Left(left => left);
+      when Right(right: Pair[Int32, Option[Span[Nat8, R]]]) do
+        return Right(right => Pair(first => ValueExpression(value => Value(value => right.first)), second => right.second): Pair[AdditiveExpression, Option[Span[Nat8, R]]]);
+    end case;
+  end;
+
+  generic [R: Region]
+  function parseNumber(string: Span[Nat8, R]): Either[String, Pair[Int32, Option[Span[Nat8, R]]]] is
+    var index: Index := 0;
+    let length: Index := spanLength(string);
+    var break: Bool := false;
+    var value: Int32 := 0;
+    while (index < length) and (not(break)) do
+      let char: Nat8 := string[index];
+      if (char < '0') or (char > '9') then
+        break := true;
+      else
+        value := (value * 10) + castInt32(char - '0');
+        index := index + 1;
+      end if;
+    end while;
+    if index = 0 then
+      return Left(left => stringFromLiteral("digit is expected but the input is empty"));
+    else if index = length then
+      return Right(right => Pair(first => value, second => None(): Option[Span[Nat8, R]]): Pair[Int32, Option[Span[Nat8, R]]]);
+    else
+      return Right(right => Pair(first => value, second => Some(value => subspan(string, index, length - 1)): Option[Span[Nat8, R]]): Pair[Int32, Option[Span[Nat8, R]]]);
     end if;
   end;
 
   generic [R: Region]
-  function evaluate(ast: &[Ast, R]): Value is
-    return Value(value => 0);
+  function skipSpaces(string: Span[Nat8, R]): Option[Span[Nat8, R]] is
+    var index: Index := 0;
+    let length: Index := spanLength(string);
+    while (index < length) and (string[index] = ' ') do
+      index := index + 1;
+    end while;
+    if index = length then
+      return None(): Option[Span[Nat8, R]];
+    else
+      return Some(value => subspan(string, index, length - 1)): Option[Span[Nat8, R]];
+    end if;
   end;
 end module body.
